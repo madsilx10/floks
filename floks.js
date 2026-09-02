@@ -97,6 +97,15 @@ const TASKS = {
   like_rt_2095075830: 100,
 };
 
+// item_key -> harga BP
+const ITEMS = {
+  water: 150,
+  thermometer: 350,
+  bulb: 300,
+  incubator: 600,
+  nest: 100,
+};
+
 // ── Load akun dari akun.txt ───────────────────────────────────
 async function loadAccounts(filepath) {
   const content = await fs.readFile(filepath, "utf-8");
@@ -497,6 +506,83 @@ async function ensureResident(accessToken, residentId, profile) {
   return ok;
 }
 
+// ── Ambil resident_id by handle ───────────────────────────────
+async function getResidentIdByHandle(accessToken, handle) {
+  const url = `${SUPABASE_URL}/rest/v1/residents?select=id&handle=eq.${encodeURIComponent(handle)}`;
+  const res = await fetch(url, { method: "GET", headers: taskHeaders(accessToken) });
+  const data = await res.json().catch(() => []);
+  if (!Array.isArray(data) || data.length === 0) return null;
+  return data[0].id;
+}
+
+// ── Vote (instant) ─────────────────────────────────────────────
+async function vote(accessToken, residentId, choice = "instant") {
+  const url = `${SUPABASE_URL}/rest/v1/votes`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...taskHeaders(accessToken), Prefer: "return=minimal" },
+    body: JSON.stringify({ resident_id: residentId, choice }),
+  });
+  const ok = res.status === 201 || res.status === 200;
+  if (!ok) {
+    const errBody = await res.text().catch(() => "");
+    console.log(`   ↳ vote status=${res.status} body=${errBody.slice(0, 300)}`);
+  }
+  return ok;
+}
+
+// ── Buy item ───────────────────────────────────────────────────
+async function buyItem(accessToken, residentId, itemKey, price) {
+  const url = `${SUPABASE_URL}/rest/v1/resident_items`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...taskHeaders(accessToken), Prefer: "return=minimal" },
+    body: JSON.stringify({ resident_id: residentId, item_key: itemKey, price }),
+  });
+  const ok = res.status === 201 || res.status === 200;
+  if (!ok) {
+    const errBody = await res.text().catch(() => "");
+    console.log(`   ↳ buyItem(${itemKey}) status=${res.status} body=${errBody.slice(0, 300)}`);
+  }
+  return ok;
+}
+
+// ── Mode: vote semua akun ─────────────────────────────────────
+async function processVote(refreshToken, idx, tokensRef, filepath, choice = "instant") {
+  const label = `[Akun ${idx}]`;
+  try {
+    const { accessToken, refreshToken: newRefreshToken, residentId } = await refreshSession(refreshToken);
+    tokensRef[idx - 1] = newRefreshToken;
+    await saveRefreshTokens(filepath, tokensRef);
+    console.log(`${label} 🔑 Session OK (resident_id=${residentId})`);
+
+    const ok = await vote(accessToken, residentId, choice);
+    console.log(`${label} ${ok ? "✅" : "❌"} vote "${choice}"`);
+    return ok;
+  } catch (err) {
+    console.log(`${label} ❌ processVote error: ${err.message}`);
+    return false;
+  }
+}
+
+// ── Mode: buy item semua akun ─────────────────────────────────
+async function processBuy(refreshToken, idx, tokensRef, filepath, itemKey, price) {
+  const label = `[Akun ${idx}]`;
+  try {
+    const { accessToken, refreshToken: newRefreshToken, residentId } = await refreshSession(refreshToken);
+    tokensRef[idx - 1] = newRefreshToken;
+    await saveRefreshTokens(filepath, tokensRef);
+    console.log(`${label} 🔑 Session OK (resident_id=${residentId})`);
+
+    const ok = await buyItem(accessToken, residentId, itemKey, price);
+    console.log(`${label} ${ok ? "✅" : "❌"} buy "${itemKey}" (${price} BP)`);
+    return ok;
+  } catch (err) {
+    console.log(`${label} ❌ processBuy error: ${err.message}`);
+    return false;
+  }
+}
+
 async function processTasks(refreshToken, idx, tokensRef, filepath, xProfile) {
   const label = `[Akun ${idx}]`;
 
@@ -543,19 +629,57 @@ function askQuestion(query) {
 
 async function showMenu(total) {
   console.log("\nPilih mode:");
+  console.log("  1. Connect X + Task");
+  console.log("  2. Vote (instant)");
+  console.log("  3. Buy Item");
+
+  const modeChoice = await askQuestion("Masukin mode (1/2/3): ");
+
+  if (modeChoice === "2") {
+    // Mode vote
+    console.log("\nPilih range akun untuk vote:");
+    console.log("  1. Semua akun");
+    console.log("  2. 1 akun");
+    console.log("  3. Range");
+    const rc = await askQuestion("Pilihan: ");
+    let rangeStr = "";
+    if (rc === "2") rangeStr = await askQuestion(`Nomor akun (1-${total}): `);
+    else if (rc === "3") rangeStr = await askQuestion("Range (contoh: 3-end atau 3-7): ");
+    return { mode: "vote", range: rangeStr };
+  }
+
+  if (modeChoice === "3") {
+    // Mode buy
+    console.log("\nPilih item:");
+    const itemKeys = Object.keys(ITEMS);
+    itemKeys.forEach((k, i) => console.log(`  ${i + 1}. ${k} (${ITEMS[k]} BP)`));
+    const itemIdx = parseInt(await askQuestion("Nomor item: "), 10) - 1;
+    const itemKey = itemKeys[itemIdx];
+    if (!itemKey) {
+      console.log("❌ Item tidak valid");
+      process.exit(1);
+    }
+    const price = ITEMS[itemKey];
+    console.log(`\nPilih range akun untuk buy ${itemKey}:`);
+    console.log("  1. Semua akun");
+    console.log("  2. 1 akun");
+    console.log("  3. Range");
+    const rc = await askQuestion("Pilihan: ");
+    let rangeStr = "";
+    if (rc === "2") rangeStr = await askQuestion(`Nomor akun (1-${total}): `);
+    else if (rc === "3") rangeStr = await askQuestion("Range (contoh: 3-end atau 3-7): ");
+    return { mode: "buy", range: rangeStr, itemKey, price };
+  }
+
+  // Mode default: connect + task
+  console.log("\nPilih range akun:");
   console.log("  1. Jalankan 1 akun");
   console.log("  2. Jalankan semua akun");
   console.log("  3. Range (dari X sampai akhir/Y)");
-
-  const choice = await askQuestion("Masukin pilihan (1/2/3): ");
-
-  if (choice === "1") {
-    return await askQuestion(`Nomor akun (1-${total}): `);
-  }
-  if (choice === "3") {
-    return await askQuestion("Range (contoh: 3-end atau 3-7): ");
-  }
-  return ""; // semua
+  const rc = await askQuestion("Pilihan (1/2/3): ");
+  if (rc === "1") return { mode: "task", range: await askQuestion(`Nomor akun (1-${total}): `) };
+  if (rc === "3") return { mode: "task", range: await askQuestion("Range (contoh: 3-end atau 3-7): ") };
+  return { mode: "task", range: "" };
 }
 
 function parseRange(arg, total) {
@@ -577,10 +701,8 @@ function parseRange(arg, total) {
   return { start: 0, end: total };
 }
 
-// ── Main: 1 mode, auto connect → task ────────────────────────
+// ── Main ──────────────────────────────────────────────────────
 async function main() {
-  const rangeArg = process.argv[2]; // opsional
-
   console.log("🔑 Cek anon key terbaru dari floks.fun...");
   const gotFreshKey = await refreshAnonKey("startup");
   console.log(
@@ -592,20 +714,64 @@ async function main() {
   const allAccounts = await loadAccounts("akun.txt");
   console.log(`📋 Total akun: ${allAccounts.length}`);
 
-  const arg = rangeArg ?? await showMenu(allAccounts.length);
-  const { start, end } = parseRange(arg, allAccounts.length);
+  const menuResult = await showMenu(allAccounts.length);
+  const { mode, range, itemKey, price } = menuResult;
+
+  const { start, end } = parseRange(range, allAccounts.length);
   const accounts = allAccounts.slice(start, end);
 
-  console.log(`▶️  Proses akun ${start + 1} s/d ${Math.min(end, allAccounts.length)}\n`);
+  console.log(`▶️  Mode: ${mode} | Akun ${start + 1} s/d ${Math.min(end, allAccounts.length)}\n`);
 
-  // Load refresh tokens yang sudah ada
+  // Load refresh tokens
   const tokens = await loadRefreshTokens("refresh.txt");
-  // Pastikan array cukup panjang
   while (tokens.length < allAccounts.length) tokens.push("");
 
   let success = 0;
   let fail = 0;
 
+  // ── Mode: vote ────────────────────────────────────────────
+  if (mode === "vote") {
+    for (let i = 0; i < accounts.length; i++) {
+      const realIdx = start + i + 1;
+      const tokenIdx = start + i;
+      let refreshToken = tokens[tokenIdx]?.trim();
+
+      if (!refreshToken) {
+        console.log(`[Akun ${realIdx}] ❌ Belum punya token, skip (jalankan mode task dulu)`);
+        fail++;
+        continue;
+      }
+
+      const ok = await processVote(refreshToken, realIdx, tokens, "refresh.txt", "instant");
+      ok ? success++ : fail++;
+      await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
+    }
+    console.log(`\n📊 Vote: ${success} berhasil, ${fail} gagal dari ${accounts.length} akun`);
+    return;
+  }
+
+  // ── Mode: buy ─────────────────────────────────────────────
+  if (mode === "buy") {
+    for (let i = 0; i < accounts.length; i++) {
+      const realIdx = start + i + 1;
+      const tokenIdx = start + i;
+      let refreshToken = tokens[tokenIdx]?.trim();
+
+      if (!refreshToken) {
+        console.log(`[Akun ${realIdx}] ❌ Belum punya token, skip (jalankan mode task dulu)`);
+        fail++;
+        continue;
+      }
+
+      const ok = await processBuy(refreshToken, realIdx, tokens, "refresh.txt", itemKey, price);
+      ok ? success++ : fail++;
+      await new Promise((r) => setTimeout(r, 1000 + Math.random() * 1000));
+    }
+    console.log(`\n📊 Buy ${itemKey}: ${success} berhasil, ${fail} gagal dari ${accounts.length} akun`);
+    return;
+  }
+
+  // ── Mode: connect + task (default) ───────────────────────
   for (let i = 0; i < accounts.length; i++) {
     const realIdx = start + i + 1;
     const tokenIdx = start + i;
@@ -614,7 +780,6 @@ async function main() {
 
     let refreshToken = tokens[tokenIdx]?.trim();
 
-    // Kalau belum punya refresh_token → connect dulu
     if (!refreshToken) {
       console.log(`${label} 🔗 Belum punya token, connect X dulu...`);
       const newToken = await connectAndGetToken(authToken, ct0, realIdx);
@@ -634,10 +799,7 @@ async function main() {
       console.log(`${label} ✔️  Token ada, skip connect`);
     }
 
-    // Ambil profil X buat upsert residents (fix FK violation)
     const xProfile = await fetchXProfile(authToken, ct0);
-
-    // Klaim task
     const ok = await processTasks(refreshToken, realIdx, tokens, "refresh.txt", xProfile);
     ok ? success++ : fail++;
 
