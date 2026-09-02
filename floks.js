@@ -163,8 +163,7 @@ async function connectAndGetToken(authToken, ct0, idx) {
       return null;
     }
 
-    // Step 4: Follow callback → floks.fun, intercept session dari Supabase
-    // Supabase callback exchange code → session, kita ikutin redirect manual
+    // Step 4: Hit redirectUri SEKALI SAJA (one-time use) → intercept loc4
     const r4 = await fetch(redirectUri, {
       method: "GET",
       headers: { ...BASE_HEADERS, Accept: "text/html,*/*", "Upgrade-Insecure-Requests": "1", Cookie: cookie },
@@ -174,10 +173,9 @@ async function connectAndGetToken(authToken, ct0, idx) {
     const loc4 = r4.headers.get("location") || "";
     console.log(`${label} Step4 ${r4.status} → ${loc4.slice(0, 80)}...`);
 
-    // Supabase exchange code dulu → dapat session
-    // URL callback floks berisi ?code= → kita POST ke Supabase token endpoint
-    const callbackUrl = loc4 || redirectUri;
-    const codeMatch = callbackUrl.match(/[?&]code=([^&]+)/);
+    // Cari ?code= dari loc4 (Supabase redirect ke floks.fun/callback?code=...)
+    // JANGAN cari dari redirectUri — sudah dipakai
+    const codeMatch = loc4.match(/[?&]code=([^&]+)/);
     const pkceCode = codeMatch?.[1];
 
     if (pkceCode) {
@@ -206,31 +204,36 @@ async function connectAndGetToken(authToken, ct0, idx) {
         console.log(`${label} ✅ Connect berhasil, refresh_token didapat`);
         return session.refresh_token;
       }
-    }
 
-    // Fallback: coba follow redirect penuh dan tangkap dari fragment/cookie
-    const r4b = await fetch(redirectUri, {
-      method: "GET",
-      headers: { ...BASE_HEADERS, Accept: "text/html,*/*", "Upgrade-Insecure-Requests": "1", Cookie: cookie },
-      redirect: "follow",
-    });
-
-    const finalUrl = r4b.url;
-    console.log(`${label} Step4b ${r4b.status} → ${finalUrl.slice(0, 80)}...`);
-
-    if (finalUrl.includes("floks.fun")) {
-      // Coba ambil dari response body (Supabase kadang embed session di HTML)
-      const body = await r4b.text();
-      const rtMatch = body.match(/"refresh_token"\s*:\s*"([^"]+)"/);
-      if (rtMatch) {
-        console.log(`${label} ✅ Connect berhasil, refresh_token dari body`);
-        return rtMatch[1];
-      }
-      console.log(`${label} ⚠️  Connect OK tapi refresh_token tidak tertangkap`);
+      // Step5 gagal (401 dll) → log error Supabase
+      console.log(`${label} ❌ Step5 gagal:`, session);
       return null;
     }
 
-    console.log(`${label} ❌ Gagal, final: ${finalUrl}`);
+    // Tidak ada ?code= di loc4 → coba follow loc4 (BUKAN redirectUri lagi)
+    if (loc4 && !loc4.includes("error=")) {
+      const r4b = await fetch(loc4, {
+        method: "GET",
+        headers: { ...BASE_HEADERS, Accept: "text/html,*/*", "Upgrade-Insecure-Requests": "1", Cookie: cookie },
+        redirect: "follow",
+      });
+
+      const finalUrl = r4b.url;
+      console.log(`${label} Step4b ${r4b.status} → ${finalUrl.slice(0, 80)}...`);
+
+      if (finalUrl.includes("floks.fun")) {
+        const body = await r4b.text();
+        const rtMatch = body.match(/"refresh_token"\s*:\s*"([^"]+)"/);
+        if (rtMatch) {
+          console.log(`${label} ✅ Connect berhasil, refresh_token dari body`);
+          return rtMatch[1];
+        }
+      }
+    } else if (loc4.includes("error=")) {
+      console.log(`${label} ❌ Supabase error di loc4: ${loc4.slice(0, 120)}`);
+    }
+
+    console.log(`${label} ⚠️  Connect OK tapi refresh_token tidak tertangkap`);
     return null;
   } catch (err) {
     console.log(`${label} ❌ Error: ${err.message}`);
