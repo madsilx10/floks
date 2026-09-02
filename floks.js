@@ -1253,8 +1253,9 @@ async function showMenu(total) {
   console.log("  3. Buy Item");
   console.log("  4. Chat (point farming)");
   console.log("  5. Double or Nothing");
+  console.log("  6. Connect X Only");
 
-  const modeChoice = await askQuestion("Enter mode (1/2/3/4/5): ");
+  const modeChoice = await askQuestion("Enter mode (1/2/3/4/5/6): ");
 
   if (modeChoice === "2") {
     // Vote mode
@@ -1267,6 +1268,19 @@ async function showMenu(total) {
     if (rc === "2") rangeStr = await askQuestion(`Account number (1-${total}): `);
     else if (rc === "3") rangeStr = await askQuestion("Range (e.g. 3-end or 3-7): ");
     return { mode: "vote", range: rangeStr };
+  }
+
+  if (modeChoice === "6") {
+    // Connect X Only — get refresh token without claiming tasks
+    console.log("\nSelect account range for Connect X Only:");
+    console.log("  1. All accounts");
+    console.log("  2. Single account");
+    console.log("  3. Range (e.g. 3-end or 3-7)");
+    const rc = await askQuestion("Choice: ");
+    let rangeStr = "";
+    if (rc === "2") rangeStr = await askQuestion(`Account number (1-${total}): `);
+    else if (rc === "3") rangeStr = await askQuestion("Range (e.g. 3-end or 3-7): ");
+    return { mode: "connect", range: rangeStr };
   }
 
   if (modeChoice === "5") {
@@ -1382,6 +1396,38 @@ async function main() {
   // ── Mode: chat ────────────────────────────────────────────
   if (mode === "chat") {
     await runChatMode(allAccounts, tokens, targetPoints, 12, start, end);
+    return;
+  }
+
+  // ── Mode: connect X only ──────────────────────────────────
+  if (mode === "connect") {
+    for (let i = 0; i < accounts.length; i++) {
+      const realIdx = start + i + 1;
+      const tokenIdx = start + i;
+      const { authToken, ct0 } = accounts[i];
+      const label = `[Account ${realIdx}]`;
+
+      const existing = tokens[tokenIdx]?.trim();
+      if (existing) {
+        console.log(`${label} ✔️  Token already exists, skip`);
+        success++;
+        continue;
+      }
+
+      console.log(`${label} 🔗 Connecting X...`);
+      const newToken = await connectAndGetToken(authToken, ct0, realIdx);
+      if (!newToken) {
+        console.log(`${label} ❌ Connect failed`);
+        fail++;
+      } else {
+        tokens[tokenIdx] = newToken;
+        await saveRefreshTokens("refresh.txt", tokens);
+        console.log(`${label} ✅ Connected, refresh_token saved`);
+        success++;
+      }
+      await new Promise((r) => setTimeout(r, 2000 + Math.random() * 1500));
+    }
+    console.log(`\n📊 Connect Only: ${success} success, ${fail} failed out of ${accounts.length} accounts`);
     return;
   }
 
