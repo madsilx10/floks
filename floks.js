@@ -1009,74 +1009,83 @@ async function getTotalPoints(accessToken, residentId) {
 
 // Chat mode: loop accounts start→end repeatedly until target points reached
 async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, start, end, chatsPerAcct = 1) {
-  const slice = allAccounts.slice(start, end);
-  const totalAccounts = slice.length;
+  const totalAccounts = end - start;
   let globalPoints = 0;
   let totalChatSent = 0;
   let round = 1;
 
+  // Cache sessions per account so we don't refresh every single chat
+  const sessions = new Array(totalAccounts).fill(null);
+
   const chatsNeeded = Math.ceil(targetPoints / pointsPerChat);
   console.log(`\n🎯 Target: ${targetPoints} pts | ${pointsPerChat} pts/chat | ~${chatsNeeded} chats total`);
-  console.log(`👥 ${totalAccounts} accounts (${start + 1}–${Math.min(end, allAccounts.length)}), ${chatsPerAcct} chat/akun, looping sampai target\n`);
+  console.log(`👥 ${totalAccounts} accounts (${start + 1}–${Math.min(end, allAccounts.length)}), ${chatsPerAcct} chat/akun/round, urutan random\n`);
+
+  // remaining[i] = sisa chat akun i di round ini
+  let remaining = new Array(totalAccounts).fill(chatsPerAcct);
+
+  console.log(`━━━ Round ${round} ━━━`);
 
   while (globalPoints < targetPoints) {
-    console.log(`\n━━━ Round ${round} ━━━ (estimated pts: ${globalPoints}/${targetPoints})`);
+    // Akun yang masih punya jatah chat dan punya token
+    const available = remaining
+      .map((left, i) => ({ i, left }))
+      .filter(({ i, left }) => left > 0 && tokens[start + i]?.trim());
 
-    for (let i = 0; i < totalAccounts; i++) {
-      if (globalPoints >= targetPoints) break;
+    // Semua akun habis jatahnya → mulai round baru
+    if (available.length === 0) {
+      round++;
+      remaining = new Array(totalAccounts).fill(chatsPerAcct);
+      sessions.fill(null); // reset session cache tiap round baru
 
-      const realIdx = start + i + 1;
-      const label = `[Account ${realIdx}]`;
-      let refreshToken = tokens[start + i]?.trim();
-
-      if (!refreshToken) {
-        console.log(`${label} ⏭️  No token yet, skip`);
-        continue;
-      }
-
-      try {
-        const { accessToken, refreshToken: newRT, residentId } = await refreshSession(refreshToken);
-        tokens[start + i] = newRT;
-        await saveRefreshTokens("refresh.txt", tokens);
-
-        console.log(`${label} 💬 Sending ${chatsPerAcct} chat(s)...`);
-
-        for (let c = 0; c < chatsPerAcct; c++) {
-          if (globalPoints >= targetPoints) break;
-          const ok = await sendChat(accessToken, residentId);
-          if (ok) {
-            globalPoints += pointsPerChat;
-            totalChatSent++;
-            console.log(`${label} ✅ Chat ${c + 1}/${chatsPerAcct} sent (+${pointsPerChat}p) → total: ${globalPoints}p`);
-          } else {
-            console.log(`${label} ❌ Chat ${c + 1}/${chatsPerAcct} failed`);
-          }
-          // 5s CD per chat (server enforced) — always wait, even after last chat of account
-          if (c < chatsPerAcct - 1) {
-            await new Promise((r) => setTimeout(r, 5500 + Math.floor(Math.random() * 1000)));
-          }
-        }
-      } catch (err) {
-        console.log(`${label} ❌ Error: ${err.message}`);
-      }
-
-      // Small gap between accounts (no extra CD needed, per-chat 5s already paces)
-      if (i < totalAccounts - 1) {
-        await new Promise((r) => setTimeout(r, 1000 + Math.floor(Math.random() * 1000)));
-      }
+      const roundDelay = 3000 + Math.floor(Math.random() * 2000);
+      console.log(`\n⏳ Semua akun selesai, round ${round} dalam ${(roundDelay / 1000).toFixed(1)}s...`);
+      await new Promise((r) => setTimeout(r, roundDelay));
+      console.log(`\n━━━ Round ${round} ━━━ (pts: ${globalPoints}/${targetPoints})`);
+      continue;
     }
 
-    round++;
+    // Pilih akun secara random dari yang masih available
+    const { i } = available[Math.floor(Math.random() * available.length)];
+    const realIdx = start + i + 1;
+    const label = `[Account ${realIdx}]`;
 
+    try {
+      // Refresh session kalau belum ada di cache
+      if (!sessions[i]) {
+        const refreshToken = tokens[start + i].trim();
+        const sess = await refreshSession(refreshToken);
+        sessions[i] = { accessToken: sess.accessToken, residentId: sess.residentId };
+        tokens[start + i] = sess.refreshToken;
+        await saveRefreshTokens("refresh.txt", tokens);
+      }
+
+      const { accessToken, residentId } = sessions[i];
+      const ok = await sendChat(accessToken, residentId);
+
+      if (ok) {
+        globalPoints += pointsPerChat;
+        totalChatSent++;
+        remaining[i]--;
+        console.log(`${label} ✅ Chat sent (+${pointsPerChat}p) → total: ${globalPoints}p`);
+      } else {
+        console.log(`${label} ❌ Chat failed`);
+        sessions[i] = null; // reset session biar refresh ulang next pick
+        remaining[i]--;
+      }
+    } catch (err) {
+      console.log(`${label} ❌ Error: ${err.message}`);
+      sessions[i] = null;
+      remaining[i]--;
+    }
+
+    // 5s CD per chat (server enforced)
     if (globalPoints < targetPoints) {
-      // Brief pause between rounds — no long wait needed since per-chat CD is the bottleneck
-      const roundDelay = 3000 + Math.floor(Math.random() * 2000);
-      console.log(`\n⏳ Round delay: ${(roundDelay / 1000).toFixed(1)}s`);
-      await new Promise((r) => setTimeout(r, roundDelay));
+      await new Promise((r) => setTimeout(r, 5500 + Math.floor(Math.random() * 1000)));
     }
   }
 
-  console.log(`\n✅ Target reached! Total chats sent: ${totalChatSent} | Estimated points: ${globalPoints}`);
+  console.log(`\n✅ Target reached! Total chats: ${totalChatSent} | Estimated points: ${globalPoints}`);
 }
 
 // ── Vote (instant) ────────────────────────────────────────────
