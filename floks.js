@@ -547,6 +547,175 @@ async function getResidentIdByHandle(accessToken, handle) {
   return data[0].id;
 }
 
+// ── Chat mode ─────────────────────────────────────────────────
+const CHAT_POOL = [
+  "wah seru juga nih proyeknya", "kapan launch mainnet?", "udah nyoba fitur barunya belum",
+  "gas terus", "komunitas makin rame nih", "semangat terus timnya", "keep building!",
+  "udah berapa lama proyek ini jalan?", "roadmap Q4 gimana?", "tokenomics nya menarik",
+  "siapa aja yang bakal listing ini?", "airdrop masih jalan kan?", "udah connect wallet belum",
+  "ini chain apa yang dipake?", "explorer nya ada ga?", "testnet masih aktif",
+  "gw baru join nih, minta info dong", "ada tutorial ga buat newbie?", "discord aktif ga?",
+  "tg bot nya keren juga", "whitepaper udah ada?", "audit kapan rilis?",
+  "backing siapa aja?", "tim doxxed?", "vesting schedulenya gimana?",
+  "supply total berapa?", "initial circulating berapa?", "listing di mana aja rencananya?",
+  "staking APR berapa?", "ada liquidity mining ga?", "yield farming ada?",
+  "NFT ada juga?", "governance udah aktif?", "snapshot kapan?",
+  "claim udah bisa?", "gas fee murah banget", "transaksi cepet juga",
+  "block timenya berapa detik?", "TPS berapa?", "finality cepet",
+  "evm compatible?", "ada bridge ke ETH?", "cross-chain support?",
+  "sdk udah ada?", "api docs lengkap ga?", "developer friendly banget",
+  "hackathon ada ga?", "grant program ada?", "ecosystem fund berapa?",
+  "ambassador program open?", "referral system keren", "poin system bagus",
+  "reward struktur menarik", "farming strategy apa yang bagus?", "worth it di farm",
+  "volume makin tinggi", "holder makin banyak", "growing fast",
+  "bullish sama proyek ini", "long term hold", "potential banget",
+  "underrated project", "hidden gem nih", "alpha dapet dari sini",
+  "community solid", "dev aktif", "update rutin bagus",
+  "transparansi bagus", "komunikasi timnya ok", "progress report ada tiap minggu",
+  "milestone udah tercapai", "on track sesuai roadmap", "ahead of schedule",
+  "partnership baru kapan?", "kolaborasi sama siapa lagi?", "ekosistem makin luas",
+  "user growth bagus", "metric on-chain positif", "TVL naik terus",
+  "liquidity deepening", "slippage kecil", "DEX volume oke",
+  "staking rewards udah klaim", "compound tiap berapa?", "auto-compound ada?",
+  "lock period berapa lama?", "unstake butuh waktu berapa?", "penalty ada ga?",
+  "referral udah aktif?", "berapa level referral?", "passive income oke",
+  "farming season kapan mulai?", "event baru kapan?", "campaign lagi jalan",
+  "leaderboard ada?", "rank gw berapa ya?", "kompetisi farming seru",
+  "hadiah top farmer apa?", "prize pool berapa?", "menarik banget event ini",
+  "udah invite teman?", "ajak yang lain masuk", "spread the word",
+  "share ke twitter dulu", "retweet dah", "viral in progress",
+  "influencer udah support?", "KOL ada yang endorse?", "media coverage bagus",
+  "coingecko listing udah?", "coinmarketcap kapan?", "dexscreener udah",
+  "chart lagi bagus", "support kuat", "resistance dimana?",
+  "FOMO mulai", "accumulate terus", "DCA aja",
+  "wallet connect lancar", "metamask compatible", "rabby bisa dipake",
+  "mobile friendly", "UI clean", "UX bagus",
+  "loading cepet", "ga ada bug", "smooth banget",
+  "feedback positif dari community", "rating bagus", "review oke",
+  "keep up the good work", "proud of this project", "excited sama future nya",
+  "gm everyone", "gn fam", "wagmi",
+  "ngga sabar nunggu mainnet", "countdown dimulai", "soon",
+  "lets go!", "to the moon", "this is the way",
+  "ser nanya dong", "mod ada?", "ada yang bisa bantu?",
+  "pertanyaan soal staking", "cara klaim gimana?", "tutorial where",
+  "step by step ada?", "video guide ada ga?", "youtube channel?",
+  "dokumentasi lengkap", "FAQ udah ada", "support ticket gimana?",
+  "response time cepet", "helpful team", "good support",
+  "appreciate the transparency", "open source?", "github aktif",
+  "commit tiap hari", "code quality bagus", "well documented",
+  "security first", "audit passed", "no rug guarantee",
+  "tim berpengalaman", "track record bagus", "credible project",
+];
+
+function randomChat() {
+  return CHAT_POOL[Math.floor(Math.random() * CHAT_POOL.length)];
+}
+
+// Kirim 1 pesan chat
+async function sendChat(accessToken, residentId) {
+  const url = `${SUPABASE_URL}/rest/v1/chat_messages`;
+  const body = { resident_id: residentId, body: randomChat(), requested_amount: null };
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...taskHeaders(accessToken),
+      Prefer: "return=minimal",
+      "X-Client-Info": "supabase-js/2.112.4; runtime=web",
+    },
+    body: JSON.stringify(body),
+  });
+  const ok = res.status === 201 || res.status === 200;
+  if (!ok) {
+    const errBody = await res.text().catch(() => "");
+    console.log(`   ↳ sendChat status=${res.status} body=${errBody.slice(0, 200)}`);
+  }
+  return ok;
+}
+
+// Hitung total poin yang udah dikumpulkan dari semua akun
+async function getTotalPoints(accessToken, residentId) {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/residents?select=points&id=eq.${residentId}`,
+    { method: "GET", headers: taskHeaders(accessToken) }
+  );
+  const data = await res.json().catch(() => []);
+  return data?.[0]?.points ?? 0;
+}
+
+// Mode chat: loop akun 1→N terus sampe target poin terpenuhi
+async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat) {
+  const totalAccounts = allAccounts.length;
+  let globalPoints = 0; // estimasi poin terkumpul (12 per chat berhasil)
+  let totalChatSent = 0;
+  let round = 1;
+
+  // Berapa chat yang dibutuhkan
+  const chatsNeeded = Math.ceil(targetPoints / pointsPerChat);
+  console.log(`\n🎯 Target: ${targetPoints} poin | ${pointsPerChat} poin/chat | ~${chatsNeeded} chat total`);
+  console.log(`👥 ${totalAccounts} akun, loop terus sampe target tercapai\n`);
+
+  while (globalPoints < targetPoints) {
+    console.log(`\n━━━ Round ${round} ━━━ (estimasi poin: ${globalPoints}/${targetPoints})`);
+
+    for (let i = 0; i < totalAccounts; i++) {
+      if (globalPoints >= targetPoints) break;
+
+      const realIdx = i + 1;
+      const label = `[Akun ${realIdx}]`;
+      let refreshToken = tokens[i]?.trim();
+
+      if (!refreshToken) {
+        console.log(`${label} ⏭️  Belum ada token, skip`);
+        continue;
+      }
+
+      try {
+        const { accessToken, refreshToken: newRT, residentId } = await refreshSession(refreshToken);
+        tokens[i] = newRT;
+        await saveRefreshTokens("refresh.txt", tokens);
+
+        // Jumlah chat per akun per round: random 1–4 biar natural
+        const chatCount = 1 + Math.floor(Math.random() * 4);
+        console.log(`${label} 💬 Kirim ${chatCount} chat...`);
+
+        for (let c = 0; c < chatCount; c++) {
+          if (globalPoints >= targetPoints) break;
+          const ok = await sendChat(accessToken, residentId);
+          if (ok) {
+            globalPoints += pointsPerChat;
+            totalChatSent++;
+            console.log(`${label} ✅ Chat ${c + 1}/${chatCount} terkirim (+${pointsPerChat}p) → total estimasi: ${globalPoints}p`);
+          } else {
+            console.log(`${label} ❌ Chat ${c + 1}/${chatCount} gagal`);
+          }
+          // Jeda antar chat dalam 1 akun: 3–8 detik
+          if (c < chatCount - 1) {
+            const delay = 3000 + Math.floor(Math.random() * 5000);
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      } catch (err) {
+        console.log(`${label} ❌ Error: ${err.message}`);
+      }
+
+      // Jeda antar akun: 2–5 detik
+      const acctDelay = 2000 + Math.floor(Math.random() * 3000);
+      await new Promise((r) => setTimeout(r, acctDelay));
+    }
+
+    round++;
+
+    // Safety: kalau semua akun udah diproses tapi belum capai target, kasih jeda antar round
+    if (globalPoints < targetPoints) {
+      const roundDelay = 10000 + Math.floor(Math.random() * 10000);
+      console.log(`\n⏳ Jeda antar round: ${(roundDelay / 1000).toFixed(1)}s`);
+      await new Promise((r) => setTimeout(r, roundDelay));
+    }
+  }
+
+  console.log(`\n✅ Target tercapai! Total chat terkirim: ${totalChatSent} | Estimasi poin: ${globalPoints}`);
+}
+
 // ── Vote (instant) ─────────────────────────────────────────────
 async function vote(accessToken, residentId, choice = "instant") {
   const url = `${SUPABASE_URL}/rest/v1/votes`;
@@ -664,8 +833,9 @@ async function showMenu(total) {
   console.log("  1. Connect X + Task");
   console.log("  2. Vote (instant)");
   console.log("  3. Buy Item");
+  console.log("  4. Chat (farming poin)");
 
-  const modeChoice = await askQuestion("Masukin mode (1/2/3): ");
+  const modeChoice = await askQuestion("Masukin mode (1/2/3/4): ");
 
   if (modeChoice === "2") {
     // Mode vote
@@ -678,6 +848,13 @@ async function showMenu(total) {
     if (rc === "2") rangeStr = await askQuestion(`Nomor akun (1-${total}): `);
     else if (rc === "3") rangeStr = await askQuestion("Range (contoh: 3-end atau 3-7): ");
     return { mode: "vote", range: rangeStr };
+  }
+
+  if (modeChoice === "4") {
+    // Mode chat
+    const targetStr = await askQuestion("Target poin yang mau dikumpulkan (default 2500): ");
+    const target = parseInt(targetStr, 10) || 2500;
+    return { mode: "chat", range: "", targetPoints: target };
   }
 
   if (modeChoice === "3") {
@@ -747,7 +924,7 @@ async function main() {
   console.log(`📋 Total akun: ${allAccounts.length}`);
 
   const menuResult = await showMenu(allAccounts.length);
-  const { mode, range, itemKey, price } = menuResult;
+  const { mode, range, itemKey, price, targetPoints } = menuResult;
 
   const { start, end } = parseRange(range, allAccounts.length);
   const accounts = allAccounts.slice(start, end);
@@ -760,6 +937,12 @@ async function main() {
 
   let success = 0;
   let fail = 0;
+
+  // ── Mode: chat ────────────────────────────────────────────
+  if (mode === "chat") {
+    await runChatMode(allAccounts, tokens, targetPoints, 12);
+    return;
+  }
 
   // ── Mode: vote ────────────────────────────────────────────
   if (mode === "vote") {
