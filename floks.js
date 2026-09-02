@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import readline from "readline";
+import crypto from "crypto";
 
 const BEARER_TOKEN =
   "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
@@ -65,13 +66,17 @@ async function connectAndGetToken(authToken, ct0, idx) {
   const label = `[Akun ${idx}]`;
   const cookie = buildCookie(authToken, ct0);
 
+  // Generate PKCE pair yang valid
+  const codeVerifier = crypto.randomBytes(32).toString("base64url");
+  const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+
   try {
     // Step 1: Supabase authorize → redirect ke X OAuth
     const supabaseUrl =
       "https://kkhttmjvokztlcttfbcy.supabase.co/auth/v1/authorize" +
       "?provider=x" +
       "&redirect_to=https%3A%2F%2Ffloks.fun%2Fcallback%3Fref%3Dmirzaeaj" +
-      "&code_challenge=0_pc-aDqtmkhjDyUvjDKlur7f7_8zN25fDp4nfXfgPQ" +
+      `&code_challenge=${codeChallenge}` +
       "&code_challenge_method=s256";
 
     const r1 = await fetch(supabaseUrl, {
@@ -190,7 +195,7 @@ async function connectAndGetToken(authToken, ct0, idx) {
         },
         body: JSON.stringify({
           auth_code: pkceCode,
-          code_verifier: "floks_verifier", // standard PKCE verifier buat challenge yg dipakai
+          code_verifier: codeVerifier,
         }),
       });
 
