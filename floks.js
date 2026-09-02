@@ -1,5 +1,4 @@
 import fs from "fs/promises";
-import fetch from "node-fetch";
 import readline from "readline";
 
 const BEARER_TOKEN =
