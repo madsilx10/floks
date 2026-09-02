@@ -401,7 +401,12 @@ async function claimTask(accessToken, residentId, taskKey, points) {
     headers: { ...taskHeaders(accessToken), Prefer: "resolution=merge-duplicates" },
     body: JSON.stringify({ resident_id: residentId, task_key: taskKey, points }),
   });
-  return res.status === 201 || res.status === 200;
+  const ok = res.status === 201 || res.status === 200;
+  if (!ok) {
+    const errBody = await res.text().catch(() => "");
+    console.log(`   ↳ status=${res.status} body=${errBody.slice(0, 300)}`);
+  }
+  return ok;
 }
 
 async function getBarnBalance(accessToken, residentId) {
