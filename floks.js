@@ -154,7 +154,8 @@ async function connectAndGetToken(authToken, ct0, idx) {
       "?provider=x" +
       "&redirect_to=https%3A%2F%2Ffloks.fun%2Fcallback%3Fref%3Dmirzaeaj" +
       `&code_challenge=${codeChallenge}` +
-      "&code_challenge_method=s256";
+      "&code_challenge_method=s256" +
+      "&options%5Bdata%5D%5Bref%5D=mirzaeaj";
 
     const r1 = await fetch(supabaseUrl, {
       method: "GET",
@@ -492,9 +493,7 @@ async function fetchXProfile(authToken, ct0) {
 // Pastikan row residents ada (upsert) sebelum claim task
 async function ensureResident(accessToken, residentId, profile) {
   const url = `${SUPABASE_URL}/rest/v1/residents?on_conflict=id`;
-  const body = profile
-    ? { id: residentId, ...profile, referred_by: "mirzaeaj" }
-    : { id: residentId, referred_by: "mirzaeaj" };
+  const body = profile ? { id: residentId, ...profile } : { id: residentId };
   const res = await fetch(url, {
     method: "POST",
     headers: { ...taskHeaders(accessToken), Prefer: "resolution=merge-duplicates" },
@@ -504,6 +503,37 @@ async function ensureResident(accessToken, residentId, profile) {
   if (!ok) {
     const errBody = await res.text().catch(() => "");
     console.log(`   ↳ ensureResident status=${res.status} body=${errBody.slice(0, 300)}`);
+  }
+  return ok;
+}
+
+// ── Patch referred_by ke residents ───────────────────────────
+// referred_by adalah UUID, jadi harus lookup UUID referrer dulu by handle
+async function patchReferredBy(accessToken, residentId, refHandle) {
+  // 1. Lookup UUID referrer
+  const refId = await getResidentIdByHandle(accessToken, refHandle);
+  if (!refId) {
+    console.log(`   ↳ patchReferredBy: handle "${refHandle}" tidak ditemukan di residents, skip`);
+    return false;
+  }
+  // 2. PATCH kolom referred_by (hanya kalau belum keisi)
+  const checkRes = await fetch(
+    `${SUPABASE_URL}/rest/v1/residents?select=referred_by&id=eq.${residentId}`,
+    { method: "GET", headers: taskHeaders(accessToken) }
+  );
+  const checkData = await checkRes.json().catch(() => []);
+  if (checkData?.[0]?.referred_by) return true; // sudah keisi, skip
+
+  const url = `${SUPABASE_URL}/rest/v1/residents?id=eq.${residentId}`;
+  const res = await fetch(url, {
+    method: "PATCH",
+    headers: { ...taskHeaders(accessToken), Prefer: "return=minimal" },
+    body: JSON.stringify({ referred_by: refId }),
+  });
+  const ok = res.status === 200 || res.status === 204;
+  if (!ok) {
+    const errBody = await res.text().catch(() => "");
+    console.log(`   ↳ patchReferredBy status=${res.status} body=${errBody.slice(0, 300)}`);
   }
   return ok;
 }
