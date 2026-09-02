@@ -99,8 +99,8 @@ async function connectAccount(authToken, ct0, idx) {
     });
 
     const json2b = await r2b.json();
-    const authCode = json2b?.code;
-    console.log(`${label} Step2b ${r2b.status} → code=${authCode ? authCode.slice(0, 12) + "..." : "TIDAK ADA"}`);
+    const authCode = json2b?.auth_code;
+    console.log(`${label} Step2b ${r2b.status} → auth_code=${authCode ? authCode.slice(0, 12) + "..." : "TIDAK ADA"}`);
 
     if (!authCode) {
       console.log(`${label} ❌ Tidak dapat code request:`, json2b);
@@ -125,7 +125,7 @@ async function connectAccount(authToken, ct0, idx) {
         "Sec-Fetch-Site": "same-site",
         Cookie: cookie,
       },
-      body: new URLSearchParams({ approval: "true", code: authCode }),
+      body: new URLSearchParams({ approval: "true", code: authCode, consent_flow: "web_consent" }),
       redirect: "manual",
     });
 
