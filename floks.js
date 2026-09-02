@@ -1192,15 +1192,33 @@ async function playDoubleOrNothing(accessToken) {
   const url = `${SUPABASE_URL}/rest/v1/rpc/play_double_or_nothing`;
   const res = await fetch(url, {
     method: "POST",
-    headers: taskHeaders(accessToken),
+    headers: {
+      ...taskHeaders(accessToken),
+      "Content-Profile": "public",
+    },
     body: JSON.stringify({}),
   });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !Array.isArray(data) || data.length === 0) {
-    const errBody = JSON.stringify(data).slice(0, 300);
-    console.log(`   ↳ playDoubleOrNothing status=${res.status} body=${errBody}`);
+
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    console.log(`   ↳ playDoubleOrNothing status=${res.status} (body parse failed)`);
     return null;
   }
+
+  if (!res.ok) {
+    const msg = data?.message || data?.hint || JSON.stringify(data);
+    console.log(`   ↳ playDoubleOrNothing ${res.status}: ${msg.slice(0, 300)}`);
+    return null;
+  }
+
+  // RPC returns [] on some error states (e.g. balance too low)
+  if (!Array.isArray(data) || data.length === 0) {
+    console.log(`   ↳ playDoubleOrNothing unexpected response: ${JSON.stringify(data).slice(0, 300)}`);
+    return null;
+  }
+
   return data[0]; // { outcome, delta, new_balance }
 }
 
