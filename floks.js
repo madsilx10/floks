@@ -23,11 +23,12 @@ const SUPABASE_URL = "https://kkhttmjvokztlcttfbcy.supabase.co";
 const ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtraHR0bWp2b2t6dGxjdHRmYmN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1Mzg1MDAsImV4cCI6MjEwMzExMzQ4MH0.CE6p0ta8Qi_4dXUGC0IEY0hl3UTSrqOIcjxsHgKyWxE";
 
-// task_key -> poin. Tambahin di sini kalau nemu task baru (misal quote_<tweetId>)
+// task_key -> poin. Tambahin di sini kalau nemu task baru
 const TASKS = {
   follow: 100,
 };
 
+// ── Load akun dari akun.txt ───────────────────────────────────
 async function loadAccounts(filepath) {
   const content = await fs.readFile(filepath, "utf-8");
   const blocks = content.trim().split(/\n\n+/);
@@ -45,7 +46,22 @@ async function loadAccounts(filepath) {
   return accounts;
 }
 
-async function connectAccount(authToken, ct0, idx) {
+// ── Load & save refresh tokens ────────────────────────────────
+async function loadRefreshTokens(filepath) {
+  try {
+    const content = await fs.readFile(filepath, "utf-8");
+    return content.split("\n").map((l) => l.trim());
+  } catch {
+    return [];
+  }
+}
+
+async function saveRefreshTokens(filepath, tokens) {
+  await fs.writeFile(filepath, tokens.join("\n") + "\n", "utf-8");
+}
+
+// ── Connect X + auto-capture refresh_token ───────────────────
+async function connectAndGetToken(authToken, ct0, idx) {
   const label = `[Akun ${idx}]`;
   const cookie = buildCookie(authToken, ct0);
 
@@ -69,7 +85,7 @@ async function connectAccount(authToken, ct0, idx) {
 
     if (!location.includes("x.com")) {
       console.log(`${label} ❌ Tidak redirect ke X`);
-      return false;
+      return null;
     }
 
     // Step 2: GET halaman authorize X
@@ -82,14 +98,8 @@ async function connectAccount(authToken, ct0, idx) {
     const finalUrl2 = r2.url;
     console.log(`${label} Step2 ${r2.status} → ${finalUrl2.slice(0, 80)}...`);
 
-    // Kalau langsung callback
-    if (finalUrl2.includes("floks.fun") && finalUrl2.includes("code=")) {
-      console.log(`${label} ✅ Langsung dapat callback`);
-      return true;
-    }
-
-    // Step 2b: GET api.x.com/2/oauth2/authorize (JSON) buat ambil "code" request-nya
-    const authorizeParams = new URL(location).search; // ambil query string dari URL step1
+    // Step 2b: GET api.x.com/2/oauth2/authorize (JSON) buat ambil auth_code
+    const authorizeParams = new URL(location).search;
     const r2b = await fetch(`https://api.x.com/2/oauth2/authorize${authorizeParams}`, {
       method: "GET",
       headers: {
@@ -113,8 +123,8 @@ async function connectAccount(authToken, ct0, idx) {
     console.log(`${label} Step2b ${r2b.status} → auth_code=${authCode ? authCode.slice(0, 12) + "..." : "TIDAK ADA"}`);
 
     if (!authCode) {
-      console.log(`${label} ❌ Tidak dapat code request:`, json2b);
-      return false;
+      console.log(`${label} ❌ Tidak dapat auth_code:`, json2b);
+      return null;
     }
 
     // Step 3: POST approve ke api.x.com/2/oauth2/authorize
@@ -145,33 +155,85 @@ async function connectAccount(authToken, ct0, idx) {
 
     if (!redirectUri) {
       console.log(`${label} ❌ Tidak dapat redirect_uri:`, json3);
-      return false;
+      return null;
     }
 
-    // Step 4: Follow callback → floks.fun
+    // Step 4: Follow callback → floks.fun, intercept session dari Supabase
+    // Supabase callback exchange code → session, kita ikutin redirect manual
     const r4 = await fetch(redirectUri, {
+      method: "GET",
+      headers: { ...BASE_HEADERS, Accept: "text/html,*/*", "Upgrade-Insecure-Requests": "1", Cookie: cookie },
+      redirect: "manual",
+    });
+
+    const loc4 = r4.headers.get("location") || "";
+    console.log(`${label} Step4 ${r4.status} → ${loc4.slice(0, 80)}...`);
+
+    // Supabase exchange code dulu → dapat session
+    // URL callback floks berisi ?code= → kita POST ke Supabase token endpoint
+    const callbackUrl = loc4 || redirectUri;
+    const codeMatch = callbackUrl.match(/[?&]code=([^&]+)/);
+    const pkceCode = codeMatch?.[1];
+
+    if (pkceCode) {
+      // Exchange PKCE code → session (dapat refresh_token)
+      const r5 = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=pkce`, {
+        method: "POST",
+        headers: {
+          ...BASE_HEADERS,
+          Accept: "*/*",
+          "Content-Type": "application/json;charset=UTF-8",
+          Apikey: ANON_KEY,
+          Authorization: `Bearer ${ANON_KEY}`,
+          Origin: "https://floks.fun",
+          Referer: "https://floks.fun/",
+        },
+        body: JSON.stringify({
+          auth_code: pkceCode,
+          code_verifier: "floks_verifier", // standard PKCE verifier buat challenge yg dipakai
+        }),
+      });
+
+      const session = await r5.json().catch(() => ({}));
+      console.log(`${label} Step5 ${r5.status} → refresh_token=${session.refresh_token ? session.refresh_token.slice(0, 12) + "..." : "TIDAK ADA"}`);
+
+      if (session.refresh_token) {
+        console.log(`${label} ✅ Connect berhasil, refresh_token didapat`);
+        return session.refresh_token;
+      }
+    }
+
+    // Fallback: coba follow redirect penuh dan tangkap dari fragment/cookie
+    const r4b = await fetch(redirectUri, {
       method: "GET",
       headers: { ...BASE_HEADERS, Accept: "text/html,*/*", "Upgrade-Insecure-Requests": "1", Cookie: cookie },
       redirect: "follow",
     });
 
-    const finalUrl4 = r4.url;
-    console.log(`${label} Step4 ${r4.status} → ${finalUrl4.slice(0, 80)}...`);
+    const finalUrl = r4b.url;
+    console.log(`${label} Step4b ${r4b.status} → ${finalUrl.slice(0, 80)}...`);
 
-    if (finalUrl4.includes("floks.fun")) {
-      console.log(`${label} ✅ Berhasil connect!`);
-      return true;
-    } else {
-      console.log(`${label} ❌ Gagal, final: ${finalUrl4}`);
-      return false;
+    if (finalUrl.includes("floks.fun")) {
+      // Coba ambil dari response body (Supabase kadang embed session di HTML)
+      const body = await r4b.text();
+      const rtMatch = body.match(/"refresh_token"\s*:\s*"([^"]+)"/);
+      if (rtMatch) {
+        console.log(`${label} ✅ Connect berhasil, refresh_token dari body`);
+        return rtMatch[1];
+      }
+      console.log(`${label} ⚠️  Connect OK tapi refresh_token tidak tertangkap`);
+      return null;
     }
+
+    console.log(`${label} ❌ Gagal, final: ${finalUrl}`);
+    return null;
   } catch (err) {
     console.log(`${label} ❌ Error: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
-// ── Task claiming (floks.fun / Supabase) ─────────────────────
+// ── Task claiming ─────────────────────────────────────────────
 function taskHeaders(accessToken) {
   return {
     ...BASE_HEADERS,
@@ -207,7 +269,7 @@ async function refreshSession(refreshToken) {
 
   return {
     accessToken: data.access_token,
-    refreshToken: data.refresh_token, // token baru — rotasi, WAJIB disimpen ulang
+    refreshToken: data.refresh_token,
     residentId: data.user?.id,
   };
 }
@@ -239,27 +301,13 @@ async function getBarnBalance(accessToken, residentId) {
   return data;
 }
 
-async function loadRefreshTokens(filepath) {
-  try {
-    const content = await fs.readFile(filepath, "utf-8");
-    return content.split("\n").map((l) => l.trim()).filter(Boolean);
-  } catch {
-    console.log(`⚠️  Gagal baca ${filepath}. Buat file ini, satu refresh_token per baris, urutan sejajar sama akun.txt.`);
-    return [];
-  }
-}
-
-async function saveRefreshTokens(filepath, tokens) {
-  await fs.writeFile(filepath, tokens.join("\n") + "\n", "utf-8");
-}
-
 async function processTasks(refreshToken, idx, tokensRef, filepath) {
   const label = `[Akun ${idx}]`;
 
   try {
     const { accessToken, refreshToken: newRefreshToken, residentId } = await refreshSession(refreshToken);
 
-    // Simpan refresh_token baru SEGERA (token lama sudah invalid habis dipakai)
+    // Simpan refresh_token baru SEGERA (rotasi — token lama invalid)
     tokensRef[idx - 1] = newRefreshToken;
     await saveRefreshTokens(filepath, tokensRef);
 
@@ -282,23 +330,15 @@ async function processTasks(refreshToken, idx, tokensRef, filepath) {
 
     return true;
   } catch (err) {
-    console.log(`${label} ❌ Error: ${err.message}`);
+    console.log(`${label} ❌ processTasks error: ${err.message}`);
     return false;
   }
 }
 
-// ── Menu interaktif (muncul kalau dijalanin tanpa argumen) ───
+// ── Menu & range parsing ──────────────────────────────────────
 function askQuestion(query) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => rl.question(query, (ans) => { rl.close(); resolve(ans.trim()); }));
-}
-
-async function showModeMenu() {
-  console.log("\nMau ngapain:");
-  console.log("  1. Connect X (OAuth)");
-  console.log("  2. Klaim task + cek balance");
-  const choice = await askQuestion("Pilih (1/2): ");
-  return choice === "2" ? "task" : "connect";
 }
 
 async function showMenu(total) {
@@ -310,29 +350,18 @@ async function showMenu(total) {
   const choice = await askQuestion("Masukin pilihan (1/2/3): ");
 
   if (choice === "1") {
-    const idx = await askQuestion(`Nomor akun (1-${total}): `);
-    return idx;
+    return await askQuestion(`Nomor akun (1-${total}): `);
   }
   if (choice === "3") {
-    const range = await askQuestion("Range (contoh: 3-end atau 3-7): ");
-    return range;
+    return await askQuestion("Range (contoh: 3-end atau 3-7): ");
   }
-  // default / choice === "2"
-  return "";
+  return ""; // semua
 }
 
-// ── Parsing argumen CLI ──────────────────────────────────────
-// node floks.js                  → munculin menu interaktif (pilih mode dulu)
-// node floks.js connect 5        → connect X, cuma akun nomor 5
-// node floks.js connect 3-end    → connect X, dari akun 3 sampai akhir
-// node floks.js task             → klaim task + cek balance, semua akun
-// node floks.js task 3-7         → klaim task akun 3 sampai 7
-// node floks.js 5                → (kompatibel lama) connect, akun nomor 5
 function parseRange(arg, total) {
-  if (!arg) return { start: 0, end: total }; // semua
+  if (!arg) return { start: 0, end: total };
 
   if (/^\d+$/.test(arg)) {
-    // 1 akun spesifik
     const idx = parseInt(arg, 10);
     return { start: idx - 1, end: idx };
   }
@@ -344,76 +373,67 @@ function parseRange(arg, total) {
     return { start, end };
   }
 
-  console.log(`⚠️  Format argumen tidak dikenali: "${arg}". Jalanin semua akun.`);
+  console.log(`⚠️  Format tidak dikenali: "${arg}". Jalanin semua.`);
   return { start: 0, end: total };
 }
 
-async function runConnect(arg) {
+// ── Main: 1 mode, auto connect → task ────────────────────────
+async function main() {
+  const rangeArg = process.argv[2]; // opsional
+
   const allAccounts = await loadAccounts("akun.txt");
   console.log(`📋 Total akun: ${allAccounts.length}`);
 
-  if (!arg) arg = await showMenu(allAccounts.length);
+  const arg = rangeArg ?? await showMenu(allAccounts.length);
   const { start, end } = parseRange(arg, allAccounts.length);
   const accounts = allAccounts.slice(start, end);
 
-  console.log(`▶️  Connect X: ${arg || "semua"} → akun ${start + 1} s/d ${Math.min(end, allAccounts.length)}\n`);
+  console.log(`▶️  Proses akun ${start + 1} s/d ${Math.min(end, allAccounts.length)}\n`);
+
+  // Load refresh tokens yang sudah ada
+  const tokens = await loadRefreshTokens("refresh.txt");
+  // Pastikan array cukup panjang
+  while (tokens.length < allAccounts.length) tokens.push("");
 
   let success = 0;
   let fail = 0;
 
   for (let i = 0; i < accounts.length; i++) {
-    const { authToken, ct0 } = accounts[i];
     const realIdx = start + i + 1;
-    console.log(`── Akun ${realIdx} auth_token=${authToken.slice(0, 12)}...`);
-    const ok = await connectAccount(authToken, ct0, realIdx);
+    const tokenIdx = start + i;
+    const { authToken, ct0 } = accounts[i];
+    const label = `[Akun ${realIdx}]`;
+
+    let refreshToken = tokens[tokenIdx]?.trim();
+
+    // Kalau belum punya refresh_token → connect dulu
+    if (!refreshToken) {
+      console.log(`${label} 🔗 Belum punya token, connect X dulu...`);
+      const newToken = await connectAndGetToken(authToken, ct0, realIdx);
+
+      if (!newToken) {
+        console.log(`${label} ❌ Connect gagal, skip task`);
+        fail++;
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
+      tokens[tokenIdx] = newToken;
+      await saveRefreshTokens("refresh.txt", tokens);
+      console.log(`${label} 💾 refresh_token tersimpan`);
+      refreshToken = newToken;
+    } else {
+      console.log(`${label} ✔️  Token ada, skip connect`);
+    }
+
+    // Klaim task
+    const ok = await processTasks(refreshToken, realIdx, tokens, "refresh.txt");
     ok ? success++ : fail++;
-    await new Promise((r) => setTimeout(r, 2000));
-  }
 
-  console.log(`\n📊 Hasil: ${success} berhasil, ${fail} gagal dari ${accounts.length} akun diproses`);
-}
-
-async function runTasks(arg) {
-  const tokens = await loadRefreshTokens("refresh.txt");
-  console.log(`📋 Total refresh_token: ${tokens.length}`);
-  if (tokens.length === 0) return;
-
-  if (!arg) arg = await showMenu(tokens.length);
-  const { start, end } = parseRange(arg, tokens.length);
-
-  console.log(`▶️  Klaim task: ${arg || "semua"} → akun ${start + 1} s/d ${Math.min(end, tokens.length)}\n`);
-
-  let success = 0;
-  let fail = 0;
-
-  for (let i = start; i < Math.min(end, tokens.length); i++) {
-    const realIdx = i + 1;
-    const ok = await processTasks(tokens[i], realIdx, tokens, "refresh.txt");
-    ok ? success++ : fail++;
     await new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
   }
 
-  console.log(`\n📊 Hasil: ${success} berhasil, ${fail} gagal`);
-}
-
-async function main() {
-  let modeArg = process.argv[2];
-  let rangeArg = process.argv[3];
-  let mode;
-
-  if (modeArg === "connect" || modeArg === "task") {
-    mode = modeArg;
-  } else {
-    // kompatibel format lama: node floks.js 3-end  → default connect
-    rangeArg = modeArg;
-    mode = await showModeMenu();
-  }
-
-  if (mode === "task") {
-    await runTasks(rangeArg);
-  } else {
-    await runConnect(rangeArg);
-  }
+  console.log(`\n📊 Hasil: ${success} berhasil, ${fail} gagal dari ${accounts.length} akun`);
 }
 
 main();
