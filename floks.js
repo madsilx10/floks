@@ -424,7 +424,7 @@ async function fetchXProfile(authToken, ct0) {
   const cookie = buildCookie(authToken, ct0);
   try {
     const res = await fetch(
-      "https://api.x.com/1.1/account/verify_credentials.json?include_entities=false&skip_status=true",
+      "https://api.x.com/1.1/account/settings.json",
       {
         headers: {
           ...BASE_HEADERS,
@@ -444,10 +444,35 @@ async function fetchXProfile(authToken, ct0) {
       console.log(`   ↳ fetchXProfile status=${res.status} body=${JSON.stringify(data).slice(0, 300)}`);
       return null;
     }
+    const screenName = data.screen_name;
+    if (!screenName) return null;
+
+    // settings.json ga ngasih 'name' & avatar, jadi ambil dari endpoint users/by
+    const res2 = await fetch(
+      `https://api.x.com/1.1/users/show.json?screen_name=${encodeURIComponent(screenName)}`,
+      {
+        headers: {
+          ...BASE_HEADERS,
+          Accept: "*/*",
+          Authorization: `Bearer ${BEARER_TOKEN}`,
+          "X-Csrf-Token": ct0,
+          "X-Twitter-Active-User": "yes",
+          "X-Twitter-Client-Language": "id",
+          Origin: "https://x.com",
+          Referer: "https://x.com/",
+          Cookie: cookie,
+        },
+      }
+    );
+    const data2 = await res2.json().catch(() => ({}));
+    if (!res2.ok) {
+      console.log(`   ↳ fetchXProfile(users/show) status=${res2.status} body=${JSON.stringify(data2).slice(0, 300)}`);
+      return { handle: screenName, name: screenName, avatar_url: "" };
+    }
     return {
-      handle: data.screen_name,
-      name: data.name,
-      avatar_url: (data.profile_image_url_https || "").replace("_normal", "_400x400"),
+      handle: screenName,
+      name: data2.name || screenName,
+      avatar_url: (data2.profile_image_url_https || "").replace("_normal", "_400x400"),
     };
   } catch (err) {
     console.log(`   ↳ fetchXProfile error: ${err.message}`);
