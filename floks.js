@@ -1008,16 +1008,16 @@ async function getTotalPoints(accessToken, residentId) {
 }
 
 // Chat mode: loop accounts start→end repeatedly until target points reached
-async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, start, end) {
+async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, start, end, chatsPerAcct = 1) {
   const slice = allAccounts.slice(start, end);
   const totalAccounts = slice.length;
-  let globalPoints = 0; // estimated points collected (pointsPerChat per successful chat)
+  let globalPoints = 0;
   let totalChatSent = 0;
   let round = 1;
 
   const chatsNeeded = Math.ceil(targetPoints / pointsPerChat);
   console.log(`\n🎯 Target: ${targetPoints} pts | ${pointsPerChat} pts/chat | ~${chatsNeeded} chats total`);
-  console.log(`👥 ${totalAccounts} accounts (${start + 1}–${Math.min(end, allAccounts.length)}), looping until target reached\n`);
+  console.log(`👥 ${totalAccounts} accounts (${start + 1}–${Math.min(end, allAccounts.length)}), ${chatsPerAcct} chat/akun, looping sampai target\n`);
 
   while (globalPoints < targetPoints) {
     console.log(`\n━━━ Round ${round} ━━━ (estimated pts: ${globalPoints}/${targetPoints})`);
@@ -1039,40 +1039,38 @@ async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, sta
         tokens[start + i] = newRT;
         await saveRefreshTokens("refresh.txt", tokens);
 
-        // Chats per account per round: random 1–4 to look natural
-        const chatCount = 1 + Math.floor(Math.random() * 4);
-        console.log(`${label} 💬 Sending ${chatCount} chat(s)...`);
+        console.log(`${label} 💬 Sending ${chatsPerAcct} chat(s)...`);
 
-        for (let c = 0; c < chatCount; c++) {
+        for (let c = 0; c < chatsPerAcct; c++) {
           if (globalPoints >= targetPoints) break;
           const ok = await sendChat(accessToken, residentId);
           if (ok) {
             globalPoints += pointsPerChat;
             totalChatSent++;
-            console.log(`${label} ✅ Chat ${c + 1}/${chatCount} sent (+${pointsPerChat}p) → estimated total: ${globalPoints}p`);
+            console.log(`${label} ✅ Chat ${c + 1}/${chatsPerAcct} sent (+${pointsPerChat}p) → total: ${globalPoints}p`);
           } else {
-            console.log(`${label} ❌ Chat ${c + 1}/${chatCount} failed`);
+            console.log(`${label} ❌ Chat ${c + 1}/${chatsPerAcct} failed`);
           }
-          // Delay between chats within 1 account: 3–8 seconds
-          if (c < chatCount - 1) {
-            const delay = 3000 + Math.floor(Math.random() * 5000);
-            await new Promise((r) => setTimeout(r, delay));
+          // 5s CD per chat (server enforced) — always wait, even after last chat of account
+          if (c < chatsPerAcct - 1) {
+            await new Promise((r) => setTimeout(r, 5500 + Math.floor(Math.random() * 1000)));
           }
         }
       } catch (err) {
         console.log(`${label} ❌ Error: ${err.message}`);
       }
 
-      // Delay between accounts: 2–5 seconds
-      const acctDelay = 2000 + Math.floor(Math.random() * 3000);
-      await new Promise((r) => setTimeout(r, acctDelay));
+      // Small gap between accounts (no extra CD needed, per-chat 5s already paces)
+      if (i < totalAccounts - 1) {
+        await new Promise((r) => setTimeout(r, 1000 + Math.floor(Math.random() * 1000)));
+      }
     }
 
     round++;
 
-    // Safety: if all accounts processed but target not yet reached, wait between rounds
     if (globalPoints < targetPoints) {
-      const roundDelay = 10000 + Math.floor(Math.random() * 10000);
+      // Brief pause between rounds — no long wait needed since per-chat CD is the bottleneck
+      const roundDelay = 3000 + Math.floor(Math.random() * 2000);
       console.log(`\n⏳ Round delay: ${(roundDelay / 1000).toFixed(1)}s`);
       await new Promise((r) => setTimeout(r, roundDelay));
     }
@@ -1319,6 +1317,9 @@ async function showMenu(total) {
     const targetStr = await askQuestion("Target points to collect (default 2500): ");
     const target = parseInt(targetStr, 10) || 2500;
 
+    const chatsPerAcctStr = await askQuestion("Chats per account per round (default 1): ");
+    const chatsPerAcct = Math.max(1, parseInt(chatsPerAcctStr, 10) || 1);
+
     console.log("\nSelect account range for chat:");
     console.log("  1. All accounts");
     console.log("  2. Single account");
@@ -1327,7 +1328,7 @@ async function showMenu(total) {
     let rangeStr = "";
     if (rc === "2") rangeStr = await askQuestion(`Account number (1-${total}): `);
     else if (rc === "3") rangeStr = await askQuestion("Range (e.g. 3-end or 3-7): ");
-    return { mode: "chat", range: rangeStr, targetPoints: target };
+    return { mode: "chat", range: rangeStr, targetPoints: target, chatsPerAcct };
   }
 
   if (modeChoice === "3") {
@@ -1413,7 +1414,7 @@ async function main() {
 
   // ── Mode: chat ────────────────────────────────────────────
   if (mode === "chat") {
-    await runChatMode(allAccounts, tokens, targetPoints, 12, start, end);
+    await runChatMode(allAccounts, tokens, targetPoints, 12, start, end, menuResult.chatsPerAcct ?? 1);
     return;
   }
 
