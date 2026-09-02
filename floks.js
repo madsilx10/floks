@@ -78,6 +78,35 @@ async function connectAccount(authToken, ct0, idx) {
       return true;
     }
 
+    // Step 2b: GET api.x.com/2/oauth2/authorize (JSON) buat ambil "code" request-nya
+    const authorizeParams = new URL(location).search; // ambil query string dari URL step1
+    const r2b = await fetch(`https://api.x.com/2/oauth2/authorize${authorizeParams}`, {
+      method: "GET",
+      headers: {
+        ...BASE_HEADERS,
+        Accept: "*/*",
+        Authorization: `Bearer ${BEARER_TOKEN}`,
+        "X-Csrf-Token": ct0,
+        "X-Twitter-Active-User": "yes",
+        "X-Twitter-Client-Language": "id",
+        Origin: "https://x.com",
+        Referer: "https://x.com/",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        Cookie: cookie,
+      },
+    });
+
+    const json2b = await r2b.json();
+    const authCode = json2b?.code;
+    console.log(`${label} Step2b ${r2b.status} → code=${authCode ? authCode.slice(0, 12) + "..." : "TIDAK ADA"}`);
+
+    if (!authCode) {
+      console.log(`${label} ❌ Tidak dapat code request:`, json2b);
+      return false;
+    }
+
     // Step 3: POST approve ke api.x.com/2/oauth2/authorize
     const r3 = await fetch("https://api.x.com/2/oauth2/authorize", {
       method: "POST",
@@ -96,7 +125,7 @@ async function connectAccount(authToken, ct0, idx) {
         "Sec-Fetch-Site": "same-site",
         Cookie: cookie,
       },
-      body: new URLSearchParams({ approval: "true", consent_flow: "web_consent" }),
+      body: new URLSearchParams({ approval: "true", code: authCode }),
       redirect: "manual",
     });
 
