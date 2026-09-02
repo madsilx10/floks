@@ -440,13 +440,17 @@ async function fetchXProfile(authToken, ct0) {
       }
     );
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) return null;
+    if (!res.ok) {
+      console.log(`   ↳ fetchXProfile status=${res.status} body=${JSON.stringify(data).slice(0, 300)}`);
+      return null;
+    }
     return {
       handle: data.screen_name,
       name: data.name,
       avatar_url: (data.profile_image_url_https || "").replace("_normal", "_400x400"),
     };
-  } catch {
+  } catch (err) {
+    console.log(`   ↳ fetchXProfile error: ${err.message}`);
     return null;
   }
 }
