@@ -18,6 +18,16 @@ function buildCookie(authToken, ct0) {
   return `auth_token=${authToken}; ct0=${ct0}`;
 }
 
+// ── Konfigurasi Supabase (floks.fun) ─────────────────────────
+const SUPABASE_URL = "https://kkhttmjvokztlcttfbcy.supabase.co";
+const ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtraHR0bWp2b2t6dGxjdHRmYmN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1Mzg1MDAsImV4cCI6MjEwMzExMzQ4MH0.CE6p0ta8Qi_4dXUGC0IEY0hl3UTSrqOIcjxsHgKyWxE";
+
+// task_key -> poin. Tambahin di sini kalau nemu task baru (misal quote_<tweetId>)
+const TASKS = {
+  follow: 100,
+};
+
 async function loadAccounts(filepath) {
   const content = await fs.readFile(filepath, "utf-8");
   const blocks = content.trim().split(/\n\n+/);
@@ -44,7 +54,7 @@ async function connectAccount(authToken, ct0, idx) {
     const supabaseUrl =
       "https://kkhttmjvokztlcttfbcy.supabase.co/auth/v1/authorize" +
       "?provider=x" +
-      "&redirect_to=https%3A%2F%2Ffloks.fun%2Fcallback" +
+      "&redirect_to=https%3A%2F%2Ffloks.fun%2Fcallback%3Fref%3Dmirzaeaj" +
       "&code_challenge=0_pc-aDqtmkhjDyUvjDKlur7f7_8zN25fDp4nfXfgPQ" +
       "&code_challenge_method=s256";
 
@@ -161,10 +171,134 @@ async function connectAccount(authToken, ct0, idx) {
   }
 }
 
+// ── Task claiming (floks.fun / Supabase) ─────────────────────
+function taskHeaders(accessToken) {
+  return {
+    ...BASE_HEADERS,
+    Accept: "*/*",
+    "Content-Type": "application/json",
+    Apikey: ANON_KEY,
+    Authorization: `Bearer ${accessToken}`,
+    Origin: "https://floks.fun",
+    Referer: "https://floks.fun/",
+  };
+}
+
+async function refreshSession(refreshToken) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: {
+      ...BASE_HEADERS,
+      Accept: "*/*",
+      "Content-Type": "application/json;charset=UTF-8",
+      Apikey: ANON_KEY,
+      Authorization: `Bearer ${ANON_KEY}`,
+      Origin: "https://floks.fun",
+      Referer: "https://floks.fun/",
+    },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok || !data.access_token) {
+    throw new Error(`refresh gagal (${res.status}): ${JSON.stringify(data)}`);
+  }
+
+  return {
+    accessToken: data.access_token,
+    refreshToken: data.refresh_token, // token baru — rotasi, WAJIB disimpen ulang
+    residentId: data.user?.id,
+  };
+}
+
+async function getDoneTasks(accessToken, residentId) {
+  const url = `${SUPABASE_URL}/rest/v1/resident_tasks?select=task_key&resident_id=eq.${residentId}`;
+  const res = await fetch(url, { method: "GET", headers: taskHeaders(accessToken) });
+  const data = await res.json().catch(() => []);
+  return new Set((Array.isArray(data) ? data : []).map((t) => t.task_key));
+}
+
+async function claimTask(accessToken, residentId, taskKey, points) {
+  const url = `${SUPABASE_URL}/rest/v1/resident_tasks?on_conflict=resident_id,task_key`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...taskHeaders(accessToken), Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({ resident_id: residentId, task_key: taskKey, points }),
+  });
+  return res.status === 201 || res.status === 200;
+}
+
+async function getBarnBalance(accessToken, residentId) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/barn_balance`, {
+    method: "POST",
+    headers: taskHeaders(accessToken),
+    body: JSON.stringify({ target: residentId }),
+  });
+  const data = await res.json().catch(() => null);
+  return data;
+}
+
+async function loadRefreshTokens(filepath) {
+  try {
+    const content = await fs.readFile(filepath, "utf-8");
+    return content.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    console.log(`⚠️  Gagal baca ${filepath}. Buat file ini, satu refresh_token per baris, urutan sejajar sama akun.txt.`);
+    return [];
+  }
+}
+
+async function saveRefreshTokens(filepath, tokens) {
+  await fs.writeFile(filepath, tokens.join("\n") + "\n", "utf-8");
+}
+
+async function processTasks(refreshToken, idx, tokensRef, filepath) {
+  const label = `[Akun ${idx}]`;
+
+  try {
+    const { accessToken, refreshToken: newRefreshToken, residentId } = await refreshSession(refreshToken);
+
+    // Simpan refresh_token baru SEGERA (token lama sudah invalid habis dipakai)
+    tokensRef[idx - 1] = newRefreshToken;
+    await saveRefreshTokens(filepath, tokensRef);
+
+    console.log(`${label} 🔑 Session OK (resident_id=${residentId})`);
+
+    const done = await getDoneTasks(accessToken, residentId);
+
+    for (const [taskKey, points] of Object.entries(TASKS)) {
+      if (done.has(taskKey)) {
+        console.log(`${label} ⏭️  "${taskKey}" udah selesai`);
+        continue;
+      }
+      const ok = await claimTask(accessToken, residentId, taskKey, points);
+      console.log(`${label} ${ok ? "✅" : "❌"} klaim "${taskKey}" (+${points})`);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    const balance = await getBarnBalance(accessToken, residentId);
+    console.log(`${label} 💰 Balance: ${balance}`);
+
+    return true;
+  } catch (err) {
+    console.log(`${label} ❌ Error: ${err.message}`);
+    return false;
+  }
+}
+
 // ── Menu interaktif (muncul kalau dijalanin tanpa argumen) ───
 function askQuestion(query) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => rl.question(query, (ans) => { rl.close(); resolve(ans.trim()); }));
+}
+
+async function showModeMenu() {
+  console.log("\nMau ngapain:");
+  console.log("  1. Connect X (OAuth)");
+  console.log("  2. Klaim task + cek balance");
+  const choice = await askQuestion("Pilih (1/2): ");
+  return choice === "2" ? "task" : "connect";
 }
 
 async function showMenu(total) {
@@ -188,10 +322,12 @@ async function showMenu(total) {
 }
 
 // ── Parsing argumen CLI ──────────────────────────────────────
-// node floks.js            → munculin menu interaktif
-// node floks.js 5          → cuma akun nomor 5
-// node floks.js 3-end      → dari akun nomor 3 sampai akhir
-// node floks.js 3-7        → dari akun nomor 3 sampai 7
+// node floks.js                  → munculin menu interaktif (pilih mode dulu)
+// node floks.js connect 5        → connect X, cuma akun nomor 5
+// node floks.js connect 3-end    → connect X, dari akun 3 sampai akhir
+// node floks.js task             → klaim task + cek balance, semua akun
+// node floks.js task 3-7         → klaim task akun 3 sampai 7
+// node floks.js 5                → (kompatibel lama) connect, akun nomor 5
 function parseRange(arg, total) {
   if (!arg) return { start: 0, end: total }; // semua
 
@@ -212,25 +348,22 @@ function parseRange(arg, total) {
   return { start: 0, end: total };
 }
 
-async function main() {
+async function runConnect(arg) {
   const allAccounts = await loadAccounts("akun.txt");
   console.log(`📋 Total akun: ${allAccounts.length}`);
 
-  let arg = process.argv[2]; // contoh: "5" atau "3-end"
-  if (!arg) {
-    arg = await showMenu(allAccounts.length);
-  }
+  if (!arg) arg = await showMenu(allAccounts.length);
   const { start, end } = parseRange(arg, allAccounts.length);
   const accounts = allAccounts.slice(start, end);
 
-  console.log(`▶️  Mode: ${arg || "semua"} → memproses akun ${start + 1} s/d ${Math.min(end, allAccounts.length)}\n`);
+  console.log(`▶️  Connect X: ${arg || "semua"} → akun ${start + 1} s/d ${Math.min(end, allAccounts.length)}\n`);
 
   let success = 0;
   let fail = 0;
 
   for (let i = 0; i < accounts.length; i++) {
     const { authToken, ct0 } = accounts[i];
-    const realIdx = start + i + 1; // nomor asli di akun.txt
+    const realIdx = start + i + 1;
     console.log(`── Akun ${realIdx} auth_token=${authToken.slice(0, 12)}...`);
     const ok = await connectAccount(authToken, ct0, realIdx);
     ok ? success++ : fail++;
@@ -238,6 +371,49 @@ async function main() {
   }
 
   console.log(`\n📊 Hasil: ${success} berhasil, ${fail} gagal dari ${accounts.length} akun diproses`);
+}
+
+async function runTasks(arg) {
+  const tokens = await loadRefreshTokens("refresh.txt");
+  console.log(`📋 Total refresh_token: ${tokens.length}`);
+  if (tokens.length === 0) return;
+
+  if (!arg) arg = await showMenu(tokens.length);
+  const { start, end } = parseRange(arg, tokens.length);
+
+  console.log(`▶️  Klaim task: ${arg || "semua"} → akun ${start + 1} s/d ${Math.min(end, tokens.length)}\n`);
+
+  let success = 0;
+  let fail = 0;
+
+  for (let i = start; i < Math.min(end, tokens.length); i++) {
+    const realIdx = i + 1;
+    const ok = await processTasks(tokens[i], realIdx, tokens, "refresh.txt");
+    ok ? success++ : fail++;
+    await new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
+  }
+
+  console.log(`\n📊 Hasil: ${success} berhasil, ${fail} gagal`);
+}
+
+async function main() {
+  let modeArg = process.argv[2];
+  let rangeArg = process.argv[3];
+  let mode;
+
+  if (modeArg === "connect" || modeArg === "task") {
+    mode = modeArg;
+  } else {
+    // kompatibel format lama: node floks.js 3-end  → default connect
+    rangeArg = modeArg;
+    mode = await showModeMenu();
+  }
+
+  if (mode === "task") {
+    await runTasks(rangeArg);
+  } else {
+    await runConnect(rangeArg);
+  }
 }
 
 main();
