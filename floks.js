@@ -419,7 +419,56 @@ async function getBarnBalance(accessToken, residentId) {
   return data;
 }
 
-async function processTasks(refreshToken, idx, tokensRef, filepath) {
+// ── Ambil profil X (buat upsert residents) ────────────────────
+async function fetchXProfile(authToken, ct0) {
+  const cookie = buildCookie(authToken, ct0);
+  try {
+    const res = await fetch(
+      "https://api.x.com/1.1/account/verify_credentials.json?include_entities=false&skip_status=true",
+      {
+        headers: {
+          ...BASE_HEADERS,
+          Accept: "*/*",
+          Authorization: `Bearer ${BEARER_TOKEN}`,
+          "X-Csrf-Token": ct0,
+          "X-Twitter-Active-User": "yes",
+          "X-Twitter-Client-Language": "id",
+          Origin: "https://x.com",
+          Referer: "https://x.com/",
+          Cookie: cookie,
+        },
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return null;
+    return {
+      handle: data.screen_name,
+      name: data.name,
+      avatar_url: (data.profile_image_url_https || "").replace("_normal", "_400x400"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Pastikan row residents ada (upsert) sebelum claim task
+async function ensureResident(accessToken, residentId, profile) {
+  if (!profile) return false;
+  const url = `${SUPABASE_URL}/rest/v1/residents?on_conflict=id`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...taskHeaders(accessToken), Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify({ id: residentId, ...profile }),
+  });
+  const ok = res.status === 201 || res.status === 200 || res.status === 204;
+  if (!ok) {
+    const errBody = await res.text().catch(() => "");
+    console.log(`   ↳ ensureResident status=${res.status} body=${errBody.slice(0, 300)}`);
+  }
+  return ok;
+}
+
+async function processTasks(refreshToken, idx, tokensRef, filepath, xProfile) {
   const label = `[Akun ${idx}]`;
 
   try {
@@ -430,6 +479,10 @@ async function processTasks(refreshToken, idx, tokensRef, filepath) {
     await saveRefreshTokens(filepath, tokensRef);
 
     console.log(`${label} 🔑 Session OK (resident_id=${residentId})`);
+
+    // Pastikan row residents ada dulu sebelum claim (fix FK violation)
+    const okResident = await ensureResident(accessToken, residentId, xProfile);
+    console.log(`${label} ${okResident ? "✅" : "⚠️"} ensureResident`);
 
     const done = await getDoneTasks(accessToken, residentId);
 
@@ -552,8 +605,11 @@ async function main() {
       console.log(`${label} ✔️  Token ada, skip connect`);
     }
 
+    // Ambil profil X buat upsert residents (fix FK violation)
+    const xProfile = await fetchXProfile(authToken, ct0);
+
     // Klaim task
-    const ok = await processTasks(refreshToken, realIdx, tokens, "refresh.txt");
+    const ok = await processTasks(refreshToken, realIdx, tokens, "refresh.txt", xProfile);
     ok ? success++ : fail++;
 
     await new Promise((r) => setTimeout(r, 1500 + Math.random() * 1500));
