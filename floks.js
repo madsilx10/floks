@@ -21,12 +21,80 @@ function buildCookie(authToken, ct0) {
 
 // ── Konfigurasi Supabase (floks.fun) ─────────────────────────
 const SUPABASE_URL = "https://kkhttmjvokztlcttfbcy.supabase.co";
-const ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtraHR0bWp2b2t6dGxjdHRmYmN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1Mzg1MDAsImV4cCI6MjEwMzExMzQ4MH0.CE6p0ta8Qi_4dXUGC0IEY0hl3UTSrqOIcjxsHgKyWxE";
+
+// Fallback kalau auto-scrape gagal (misal jaringan bermasalah pas startup).
+// Ini BUKAN sumber utama lagi — di awal main() bakal dicoba refresh otomatis.
+let ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtraHR0bWp2b2t6dGxjdHRmYmN5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1Mzg1MDAsImV4cCI6MjEwMzExNDUwMH0.CE6p0ta8Qi_4dXUGC0IEY0hl3UTSrqOIcjxsHgKyWxE";
+
+// ── Auto-scrape anon key terbaru dari floks.fun ───────────────
+// Anon key Supabase memang publik by design → nongol di bundle JS frontend.
+// Nama file bundle-nya berubah tiap deploy (hash Vite), jadi kita ambil
+// dulu daftar file dari HTML, baru cari pola JWT di masing-masing file.
+async function fetchLatestAnonKey() {
+  try {
+    const htmlRes = await fetch("https://floks.fun/", {
+      headers: { ...BASE_HEADERS, Accept: "text/html,*/*" },
+    });
+    const html = await htmlRes.text();
+
+    // Ambil semua kandidat file JS yang di-reference di HTML
+    const srcMatches = [...html.matchAll(/(?:src|href)="(\/[^"]+\.js)"/g)].map((m) => m[1]);
+    const uniqueSrcs = [...new Set(srcMatches)];
+
+    if (uniqueSrcs.length === 0) {
+      console.log("⚠️  Auto-scrape: ga nemu file .js di HTML floks.fun");
+      return null;
+    }
+
+    const jwtPattern = /eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+
+    for (const src of uniqueSrcs) {
+      try {
+        const jsUrl = src.startsWith("http") ? src : `https://floks.fun${src}`;
+        const jsRes = await fetch(jsUrl, { headers: BASE_HEADERS });
+        if (!jsRes.ok) continue;
+        const js = await jsRes.text();
+        const match = js.match(jwtPattern);
+        if (match) return match[0];
+      } catch {
+        // file ini gagal di-fetch/parse, lanjut coba file berikutnya
+        continue;
+      }
+    }
+
+    console.log("⚠️  Auto-scrape: udah cek semua file .js, ga nemu pola anon key");
+    return null;
+  } catch (err) {
+    console.log(`⚠️  Auto-scrape anon key gagal: ${err.message}`);
+    return null;
+  }
+}
+
+// Update ANON_KEY global kalau scrape berhasil dan hasilnya beda dari yang lama
+async function refreshAnonKey(reason = "") {
+  const newKey = await fetchLatestAnonKey();
+  if (newKey && newKey !== ANON_KEY) {
+    ANON_KEY = newKey;
+    console.log(`🔄 ANON_KEY di-update otomatis${reason ? ` (${reason})` : ""}`);
+    return true;
+  }
+  if (newKey) return true; // sama kayak yang lama, tetep valid
+  return false; // scrape gagal total
+}
+
+// Deteksi respons Supabase yang nunjukin anon key invalid/basi
+function isInvalidApiKeyError(data) {
+  const msg = `${data?.message || ""} ${data?.hint || ""}`.toLowerCase();
+  return msg.includes("invalid api key") || msg.includes("anon");
+}
 
 // task_key -> poin. Tambahin di sini kalau nemu task baru
 const TASKS = {
   follow: 100,
+  quote_2095075830: 100,
+  tag2_2095075830: 100,
+  like_rt_2095075830: 100,
 };
 
 // ── Load akun dari akun.txt ───────────────────────────────────
@@ -197,7 +265,7 @@ async function connectAndGetToken(authToken, ct0, idx) {
         }),
       });
 
-      const session = await r5.json().catch(() => ({}));
+      let session = await r5.json().catch(() => ({}));
       console.log(`${label} Step5 ${r5.status} → refresh_token=${session.refresh_token ? session.refresh_token.slice(0, 12) + "..." : "TIDAK ADA"}`);
 
       if (session.refresh_token) {
@@ -205,7 +273,32 @@ async function connectAndGetToken(authToken, ct0, idx) {
         return session.refresh_token;
       }
 
-      // Step5 gagal (401 dll) → log error Supabase
+      // Step5 gagal → cek apakah gara-gara anon key basi, kalau iya scrape ulang & retry sekali
+      if (isInvalidApiKeyError(session)) {
+        console.log(`${label} 🔍 Kemungkinan anon key basi, coba scrape ulang...`);
+        const refreshed = await refreshAnonKey("dipicu Step5 gagal");
+        if (refreshed) {
+          const r5b = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=pkce`, {
+            method: "POST",
+            headers: {
+              ...BASE_HEADERS,
+              Accept: "*/*",
+              "Content-Type": "application/json;charset=UTF-8",
+              Apikey: ANON_KEY,
+              Authorization: `Bearer ${ANON_KEY}`,
+              Origin: "https://floks.fun",
+              Referer: "https://floks.fun/",
+            },
+            body: JSON.stringify({ auth_code: pkceCode, code_verifier: codeVerifier }),
+          });
+          session = await r5b.json().catch(() => ({}));
+          if (session.refresh_token) {
+            console.log(`${label} ✅ Connect berhasil setelah retry, refresh_token didapat`);
+            return session.refresh_token;
+          }
+        }
+      }
+
       console.log(`${label} ❌ Step5 gagal:`, session);
       return null;
     }
@@ -255,21 +348,33 @@ function taskHeaders(accessToken) {
 }
 
 async function refreshSession(refreshToken) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-    method: "POST",
-    headers: {
-      ...BASE_HEADERS,
-      Accept: "*/*",
-      "Content-Type": "application/json;charset=UTF-8",
-      Apikey: ANON_KEY,
-      Authorization: `Bearer ${ANON_KEY}`,
-      Origin: "https://floks.fun",
-      Referer: "https://floks.fun/",
-    },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
+  const doRefresh = () =>
+    fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: {
+        ...BASE_HEADERS,
+        Accept: "*/*",
+        "Content-Type": "application/json;charset=UTF-8",
+        Apikey: ANON_KEY,
+        Authorization: `Bearer ${ANON_KEY}`,
+        Origin: "https://floks.fun",
+        Referer: "https://floks.fun/",
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
 
-  const data = await res.json().catch(() => ({}));
+  let res = await doRefresh();
+  let data = await res.json().catch(() => ({}));
+
+  // Anon key basi → scrape ulang & retry sekali sebelum nyerah
+  if (!res.ok && isInvalidApiKeyError(data)) {
+    console.log(`🔍 refreshSession: kemungkinan anon key basi, coba scrape ulang...`);
+    const refreshed = await refreshAnonKey("dipicu refreshSession gagal");
+    if (refreshed) {
+      res = await doRefresh();
+      data = await res.json().catch(() => ({}));
+    }
+  }
 
   if (!res.ok || !data.access_token) {
     throw new Error(`refresh gagal (${res.status}): ${JSON.stringify(data)}`);
@@ -388,6 +493,14 @@ function parseRange(arg, total) {
 // ── Main: 1 mode, auto connect → task ────────────────────────
 async function main() {
   const rangeArg = process.argv[2]; // opsional
+
+  console.log("🔑 Cek anon key terbaru dari floks.fun...");
+  const gotFreshKey = await refreshAnonKey("startup");
+  console.log(
+    gotFreshKey
+      ? "✅ Anon key siap dipakai"
+      : "⚠️  Auto-scrape gagal, pakai fallback hardcoded (mungkin udah basi)"
+  );
 
   const allAccounts = await loadAccounts("akun.txt");
   console.log(`📋 Total akun: ${allAccounts.length}`);
