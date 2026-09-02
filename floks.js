@@ -492,7 +492,9 @@ async function fetchXProfile(authToken, ct0) {
 // Pastikan row residents ada (upsert) sebelum claim task
 async function ensureResident(accessToken, residentId, profile) {
   const url = `${SUPABASE_URL}/rest/v1/residents?on_conflict=id`;
-  const body = profile ? { id: residentId, ...profile } : { id: residentId };
+  const body = profile
+    ? { id: residentId, ...profile, referred_by: "mirzaeaj" }
+    : { id: residentId, referred_by: "mirzaeaj" };
   const res = await fetch(url, {
     method: "POST",
     headers: { ...taskHeaders(accessToken), Prefer: "resolution=merge-duplicates" },
