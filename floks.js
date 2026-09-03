@@ -1007,18 +1007,20 @@ async function getTotalPoints(accessToken, residentId) {
   return data?.[0]?.points ?? 0;
 }
 
-// Chat mode: loop accounts start→end repeatedly until target points reached
+// Chat mode: loop accounts start→end repeatedly until EACH account reaches target points
 async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, start, end, chatsPerAcct = 1) {
   const totalAccounts = end - start;
-  let globalPoints = 0;
   let totalChatSent = 0;
   let round = 1;
+
+  // Track points PER ACCOUNT (bukan global)
+  const accountPoints = new Array(totalAccounts).fill(0);
 
   // Cache sessions per account so we don't refresh every single chat
   const sessions = new Array(totalAccounts).fill(null);
 
   const chatsNeeded = Math.ceil(targetPoints / pointsPerChat);
-  console.log(`\n🎯 Target: ${targetPoints} pts | ${pointsPerChat} pts/chat | ~${chatsNeeded} chats total`);
+  console.log(`\n🎯 Target per akun: ${targetPoints} pts | ${pointsPerChat} pts/chat | ~${chatsNeeded} chats/akun`);
   console.log(`👥 ${totalAccounts} accounts (${start + 1}–${Math.min(end, allAccounts.length)}), ${chatsPerAcct} chat/akun/round, urutan random\n`);
 
   // remaining[i] = sisa chat akun i di round ini
@@ -1026,22 +1028,28 @@ async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, sta
 
   console.log(`━━━ Round ${round} ━━━`);
 
-  while (globalPoints < targetPoints) {
-    // Akun yang masih punya jatah chat dan punya token
+  // Lanjut selama masih ada akun yang belum capai target dan punya token
+  while (accountPoints.some((pts, i) => pts < targetPoints && tokens[start + i]?.trim())) {
+    // Akun yang masih punya jatah chat, punya token, dan BELUM capai target per akun
     const available = remaining
       .map((left, i) => ({ i, left }))
-      .filter(({ i, left }) => left > 0 && tokens[start + i]?.trim());
+      .filter(({ i, left }) => left > 0 && tokens[start + i]?.trim() && accountPoints[i] < targetPoints);
 
-    // Semua akun habis jatahnya → mulai round baru
+    // Semua akun habis jatahnya di round ini → mulai round baru
     if (available.length === 0) {
       round++;
       remaining = new Array(totalAccounts).fill(chatsPerAcct);
       sessions.fill(null); // reset session cache tiap round baru
 
       const roundDelay = 3000 + Math.floor(Math.random() * 2000);
-      console.log(`\n⏳ Semua akun selesai, round ${round} dalam ${(roundDelay / 1000).toFixed(1)}s...`);
+      // Tampilkan progress per akun
+      const summary = accountPoints
+        .map((p, i) => `Akun${start + i + 1}: ${p}/${targetPoints}pts${p >= targetPoints ? " ✅" : ""}`)
+        .join(" | ");
+      console.log(`\n📊 Progress: ${summary}`);
+      console.log(`⏳ Round ${round} dalam ${(roundDelay / 1000).toFixed(1)}s...`);
       await new Promise((r) => setTimeout(r, roundDelay));
-      console.log(`\n━━━ Round ${round} ━━━ (pts: ${globalPoints}/${targetPoints})`);
+      console.log(`\n━━━ Round ${round} ━━━`);
       continue;
     }
 
@@ -1064,10 +1072,13 @@ async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, sta
       const ok = await sendChat(accessToken, residentId);
 
       if (ok) {
-        globalPoints += pointsPerChat;
+        accountPoints[i] += pointsPerChat;
         totalChatSent++;
         remaining[i]--;
-        console.log(`${label} ✅ Chat sent (+${pointsPerChat}p) → total: ${globalPoints}p`);
+        console.log(`${label} ✅ Chat sent (+${pointsPerChat}p) → akun: ${accountPoints[i]}/${targetPoints}p`);
+        if (accountPoints[i] >= targetPoints) {
+          console.log(`${label} 🎯 Target akun tercapai!`);
+        }
       } else {
         console.log(`${label} ❌ Chat failed`);
         sessions[i] = null; // reset session biar refresh ulang next pick
@@ -1080,12 +1091,16 @@ async function runChatMode(allAccounts, tokens, targetPoints, pointsPerChat, sta
     }
 
     // 5s CD per chat (server enforced)
-    if (globalPoints < targetPoints) {
+    const stillRunning = accountPoints.some((pts, i) => pts < targetPoints && tokens[start + i]?.trim());
+    if (stillRunning) {
       await new Promise((r) => setTimeout(r, 5500 + Math.floor(Math.random() * 1000)));
     }
   }
 
-  console.log(`\n✅ Target reached! Total chats: ${totalChatSent} | Estimated points: ${globalPoints}`);
+  console.log(`\n✅ Semua akun selesai! Total chats terkirim: ${totalChatSent}`);
+  accountPoints.forEach((pts, i) => {
+    console.log(`  [Account ${start + i + 1}] ${pts} pts dari chat`);
+  });
 }
 
 // ── Vote (instant) ────────────────────────────────────────────
